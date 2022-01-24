@@ -1,0 +1,1390 @@
+---
+title: "Empirical Study for Master Thesis"
+author: "Nhu Le"
+date: '2021-12-31'
+output:
+  html_document:
+    toc: yes
+  pdf_document: 
+    toc: yes
+    number_sections: yes
+---
+
+```{css, echo=FALSE}
+pre {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+pre[class] {
+  max-height: 200px;
+}
+```
+
+# Empirical Study for Master Thesis
+
+## Required packages
+```{r}
+# install.packages(c(
+#     "tidyverse",
+#     "MSGARCH",
+#     "e1071",
+#     "patchwork",
+#     "tseries",
+#     "bridgesampling",
+#     "GAS"
+# ))
+
+```
+
+## Imports
+
+```{r}
+library(tidyverse)
+library(MSGARCH)
+library(e1071)
+library(ggplot2)
+library(patchwork)
+library(tseries)
+library(bridgesampling)
+library(GAS)
+library(parallel)
+
+Sys.setenv(LANGUAGE="en")
+Sys.setlocale("LC_TIME", "English")
+```
+
+## Read and Process data
+
+We have at hand 2 BTC-USD datasets, all daily, from 2015-01-01 until (including) 2021-12-20. We will read them and do some basic difference analysis to see if there is anything important pop up. But first, some preprocessing is needed:
+- Convert string dates to actual dates
+- Calculate return
+
+
+```{r}
+bf_data_path <- "raw_data/bitfinex_btc_usd_20150101_20211220.csv"
+yh_data_path <- "raw_data/yahoo_btc_usd_20150101_20211220.csv"
+bf_data <- read_csv(bf_data_path)
+yh_data <- read_csv(yh_data_path)
+
+# process bf
+bf_data$Date = parse_date(bf_data$Date, "%b %d, %Y")
+bf_data <- bf_data %>%
+    arrange(Date) %>% # parse datetime and sort
+    mutate(return=(.$Price - lag(.$Price)) /  lag(.$Price)) %>% # calculate return
+    mutate(log_return=log(1 + .$return) * 100) %>% # log return
+    drop_na(return)
+# process yh
+yh_data <- yh_data %>%
+    arrange(Date) %>%
+    mutate(return=(.$Close - lag(.$Close)) /  lag(.$Close)) %>%
+    mutate(log_return=log(1 + .$return) * 100) %>%
+    drop_na(return)
+
+# inspect 
+bf_data[1:5, ]
+yh_data[1:5, ]
+
+```
+
+## Dataset comparison
+
+Here we compare the 2 datasets
+
+```{r}
+diff_data <- bf_data %>%
+    filter(Date >= min(yh_data$Date)) %>%
+    mutate(
+        diff_price=(Price - yh_data$Close) / yh_data$Close * 100,
+        diff_return=(log_return - yh_data$log_return) / yh_data$log_return
+    )
+
+price_plot <- ggplot() +
+    geom_line(
+        data=yh_data, 
+        aes(x=Date, y=Close),
+        color="red",
+        alpha=0.6) +
+    geom_line(
+        data=bf_data, 
+        aes(x=Date, y=Price), 
+        color="darkblue",
+        linetype="dashed",
+        alpha=0.6) +
+    # scale_y_continuous(
+    #     trans='log10',
+    #     name="BTC-USD Price"
+    # ) +
+    xlab("Date") +
+    ylab("Price") +
+    ggtitle('Bitfinex - Yahoo Price')
+
+price_diff_plot <- ggplot() +
+    geom_col(
+        data=diff_data, 
+        aes(x=Date, y=diff_price), 
+        color="darkblue", 
+        alpha = 0.5
+        ) +
+    # scale_y_continuous(
+    #     trans='log10'
+    # ) +
+    xlab("Date") +
+    ylab("Price Difference, %") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle('Bitfinex - Yahoo Price Difference')
+
+price_plot + price_diff_plot
+
+```
+
+```{r}
+return_plot <- ggplot() +
+    geom_line(
+        data=yh_data, 
+        aes(x=Date, y=log_return), 
+        color="red", 
+        alpha=0.6) +
+    geom_line(
+        data=bf_data, 
+        aes(x=Date, y=log_return), 
+        color="darkblue", 
+        alpha=0.6) +
+    # scale_y_continuous(
+    #     trans='log',
+    #     name="BTC-USD Return"
+    # ) +
+    xlab("Date") +
+    ylab("Price") +
+    ggtitle('Bitfinex - Yahoo Log Return')
+
+return_diff_plot <- ggplot() +
+    geom_col(
+        data=diff_data, 
+        aes(x=Date, y=diff_return), 
+        # stat='identity', 
+        color="darkblue",
+        alpha = 0.5
+        ) +
+    # scale_y_continuous(
+    #     trans='log'
+    # ) +
+    xlab("Date") +
+    ylab("Return Difference, %") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle('Bitfinex - Yahoo Return Difference')
+
+return_plot + return_diff_plot
+
+```
+```{r}
+data_diff_plot <- price_diff_plot / return_diff_plot
+ggsave(
+    "./latex/empirical_results/data_diff.png",
+    data_diff_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+data_diff_plot
+```
+
+## Descriptive Analysis
+
+Descriptive analysis using Bitfinex data includes:
+- Max, Min, Mean, Median, Std
+- Skewness, Kurtosis, Jb p-value
+- Histogram
+
+### Summary
+```{r}
+summary_stats <- as_tibble(data.frame(
+    Min=min(bf_data$log_return),
+    Max=max(bf_data$log_return),
+    Mean=mean(bf_data$log_return),
+    Median=median(bf_data$log_return),
+    Std=sd(bf_data$log_return),
+    Annualized_std=sqrt(365) * sd(bf_data$log_return),
+    Skewness=skewness(bf_data$log_return),
+    Kurtosis=kurtosis(bf_data$log_return),
+    JB_pval=jarque.bera.test(bf_data$log_return)$p.value
+))
+
+knitr::kable(summary_stats, "simple")
+```
+
+### Plots
+```{r fig.height=6, fig.width=10}
+# plot prices and returns
+price_plot <- ggplot() +
+    geom_line(
+        data=bf_data, 
+        aes(x=Date, y=Price), 
+        color="darkblue", 
+        alpha=0.8) +
+    xlab("Date") +
+    ylab("BTC-USD Price") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle("BTC-USD Historical Price")
+
+return_plot <- ggplot() +
+    geom_line(
+        data=bf_data, 
+        aes(x=Date, y=log_return), 
+        color="darkblue", 
+        alpha=0.8) +
+    xlab("Date") +
+    ylab("Log Return") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle('BTC Log Return (%)')
+price_return_plot <- price_plot / return_plot
+ggsave(
+    "./latex/empirical_results/price_return.png",
+    price_return_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+price_return_plot
+```
+
+### Histograms
+```{r fig.height=6, fig.width=10}
+# plot histogram
+hist_plot <- ggplot(data=bf_data, aes(log_return)) +
+    geom_histogram(
+        aes(y=..density..), 
+        bins=60, 
+        colour="black", 
+        fill="white",
+        alpha=0.5
+    ) +
+    geom_density(fill='darkblue', alpha=.3) +
+    xlab("") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle("Log Return (%) histogram and density plot")
+
+box_plot <- ggplot(data=bf_data, aes(log_return)) +
+    xlab("Log Return (%)") +
+    geom_boxplot()
+
+hist_box_plot <- hist_plot / box_plot
+
+ggsave(
+    "./latex/empirical_results/density.png",
+    hist_box_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+hist_box_plot
+```
+### Lags analysis
+
+Next, we do some initial time series analysis with ACF and PACF.
+As in the ACF plot for log return, there is no strong evidence that indicates
+autocorrelation. However, absolute returns show long diminishing 
+autocorrelation, indicating possible variance clustering, where large changes
+happen close to each other.
+
+```{r fig.height=6, fig.width=10}
+max_lags = 100
+acf_data <- with(
+    acf(bf_data$log_return, lag.max=max_lags, plot=FALSE),
+    as_tibble(data.frame(lag, acf))
+)
+abs_acf_data <- with(
+    acf(abs(bf_data$log_return), lag.max=max_lags, plot=FALSE),
+    as_tibble(data.frame(lag, acf))
+)
+pacf_data <- with(
+    pacf(bf_data$log_return, lag.max=max_lags, plot=FALSE),
+    as_tibble(data.frame(lag, acf))
+)
+bounds <- c(- 1.96 / sqrt(nrow(bf_data)), 1.96 / sqrt(nrow(bf_data)))
+
+acf_plot <- ggplot(data=acf_data[2:max_lags, ], aes(x=lag, y=acf)) +
+    geom_hline(aes(yintercept=0)) +
+    geom_segment(mapping=aes(xend=lag, yend=0), color="darkblue") +
+    geom_hline(aes(yintercept=bounds[1]), color="red", linetype="dashed") +
+    geom_hline(aes(yintercept=bounds[2]), color="red", linetype="dashed") +
+    xlab("") +
+    ylab("ACF") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle("ACF of log returns")
+    
+abs_acf_plot <- ggplot(data=abs_acf_data[2:max_lags, ], aes(x=lag, y=acf)) +
+    geom_hline(aes(yintercept=0)) +
+    geom_segment(mapping=aes(xend=lag, yend=0), color="darkblue") +
+    geom_hline(aes(yintercept=bounds[2]), color="red", linetype="dashed") +
+    xlab("Lag") +
+    ylab("Absolute ACF") +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ggtitle("Absolute ACF of log returns")
+
+lag_plot <- acf_plot / abs_acf_plot
+ggsave(
+    "./latex/empirical_results/acf.png",
+    lag_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+lag_plot
+```
+
+## In-sample analysis
+
+Demean and filter data first
+```{r}
+filter_return <- function(log_return) {
+    demeaned_log_return <- log_return - mean(log_return)
+    as.vector(stats::filter(
+        demeaned_log_return, 
+        ar(demeaned_log_return, demean = FALSE)$ar,
+        method = c("recursive")
+    ))
+}
+bf_data <- bf_data %>%
+    mutate(f_log_return = filter_return(bf_data$log_return))
+
+```
+
+First we perform model selection between some settings.
+- Model specifications: sGARCH and GJR
+- Number of regimes: 1, 2, 3
+- Distributions: Standard Normal, Student-t, Skewed Student-t
+
+Selection criteria will AIC, BIC, DIC
+
+### Parameters estimation
+
+```{r}
+# first set seed to ensure reproducibility
+set.seed(267)
+
+# create model specifications
+# options
+model_choices = c("sGARCH", "gjrGARCH")
+regime_choices = c(1, 2, 3)
+dist_choices = c("norm", "std", "sstd")
+# optim_method_names = c("FitML")
+optim_method_names = c("FitMCMC", "FitML")
+model_options = expand_grid(
+    model_choices, dist_choices, regime_choices, optim_method_names)
+
+# set up routine function
+i = 1
+
+fit_model <- function(specs, data) {
+    start_time <- proc.time()
+    # make option
+    these_options <- list(
+        model=c(specs[["model_choices"]]),
+        distribution=c(specs[["dist_choices"]]),
+        do.mix=FALSE,
+        K=specs[["regime_choices"]]
+    )
+    optim_func <- get(specs[["optim_method_names"]])
+    # create model specs
+    model_specs <- CreateSpec(
+        variance.spec=these_options,
+        distribution.spec=these_options,
+        switch.spec=these_options
+    )
+    optim_result <- optim_func(spec=model_specs, data=data)
+    elapsed_time <- proc.time() - start_time
+    info_str <- sprintf(
+        "--- Specs %i/%i, optimizer %s, took %f",
+        i,
+        nrow(model_options),
+        specs[["optim_method_names"]],
+        elapsed_time[["elapsed"]])
+    print(info_str)
+    # print(model_specs)
+    i <<- i + 1
+    optim_result$elapsed_time <- elapsed_time[["elapsed"]]
+    # return the result
+    optim_result
+}
+
+optim_results = apply(
+    X = model_options,
+    MARGIN = 1,
+    FUN = function(x) fit_model(x, data = bf_data$log_return)
+)
+
+```
+
+### ML Estimation analysis
+Take a look at FitML results first
+
+```{r}
+ml_model_options <- model_options %>%
+    filter(optim_method_names == "FitML")
+
+ml_optim_results <- optim_results[model_options$optim_method_names == "FitML"]
+
+ml_model_options$AIC_val = sapply(ml_optim_results, function(x) {AIC(x)})
+ml_model_options$BIC_val = sapply(ml_optim_results, function(x) {BIC(x)})
+
+ml_model_options <- ml_model_options %>%
+    pivot_wider(
+        id_cols=c(regime_choices, model_choices),
+        names_from=c(dist_choices),
+        values_from=c(AIC_val, BIC_val)
+    ) %>%
+    arrange(regime_choices, desc(model_choices)) %>%
+    relocate(
+        regime_choices, model_choices, 
+        AIC_val_norm, BIC_val_norm, 
+        AIC_val_std, BIC_val_std, 
+        AIC_val_sstd, BIC_val_sstd
+    )
+
+knitr::kable(ml_model_options, "simple")
+```
+
+```{r}
+
+# get models for further analysis
+chosen_models_mask <- {
+    (model_options$dist_choices == "sstd") & 
+    (model_options$model_choices == "sGARCH") &
+    (model_options$optim_method_names == "FitML")
+}
+chosen_models = optim_results[chosen_models_mask]
+
+# calculate annualized volatility
+calculate_annualized_volatility <- function(full_model) {
+    # first expand the regimes
+    regimes = ExtractStateFit(full_model)
+    uncond_vols = lapply(regimes, UncVol)
+    lapply(uncond_vols, function(x) {sqrt(365) * x})
+}
+
+
+arrange_params_estimates <- function(ml_model) {
+    # prepare some vars
+    num_regimes <- ml_model$spec$K
+    param_names <- names(ml_model$par)
+    regimes <- str_split(param_names, "_", simplify = TRUE)[, 2]
+    unique_regimes <- unique(regimes)
+
+    # calculate annualized vols
+    ann_vol <- unlist(calculate_annualized_volatility(ml_model))
+    ann_vol_param_names <- sapply(
+        unique_regimes,
+        function(x) paste("ann_vol", x, sep = "_")
+    )
+    ann_vol_df <- tibble(
+        param = ann_vol_param_names,
+        regime = unique_regimes,
+        est = ann_vol
+    ) %>%
+    rename_with(function(x) {paste("est", num_regimes, sep = "_")}, "est")
+
+    
+    # organize into tibble
+    summary_df <- as_tibble(summary(ml_model)$estimate) 
+    colnames(summary_df) <- sapply(
+        c("est", "stderr", "tstat", "pval"),
+        function(x) paste(x, num_regimes, sep = "_")
+    )
+    summary_df %>%
+        mutate(
+            param = param_names,
+            regime = regimes,
+            .before = paste("est", num_regimes, sep = "_")
+        ) %>%
+        bind_rows(., ann_vol_df) %>%
+        arrange(regime, param)
+}
+
+ml_params <- lapply(
+    chosen_models,
+    arrange_params_estimates
+)
+
+ml_params_df <- as_tibble(
+    Reduce(
+        function(...) merge(..., by=c("param", "regime"), all = TRUE),
+        ml_params
+    )
+) %>% arrange(regime, param)
+
+knitr::kable(ml_params_df, "simple")
+
+```
+
+
+```{r fig.height=6, fig.width=10}
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+ml_ind <- 2
+state <- State(object = chosen_models[[ml_ind]])
+bf_data <- bf_data %>% 
+    mutate(
+        smooth_prob_2 = state$SmoothProb[1:nrow(bf_data), 1, 1, drop = TRUE],
+        volatility_2 = sqrt(365) * Volatility(chosen_models[[ml_ind]]),
+        viterbi = as_factor(
+            ifelse(apply(state$Viterbi, 1, getmode) == 1, "High", "Low")
+        )
+    )
+
+smoothed_prob_plot = ggplot(data = bf_data, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return / 100 + 0.5, color = viterbi),
+        size = 0.7,
+        alpha = 0.6
+    ) +
+    geom_line(aes(y = smooth_prob_2), color="darkblue") +
+    xlab("") + 
+    ylab("Smoothed Probability") +
+    theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    ggtitle("Smoothed probabilities of the high-volatility regime")
+
+volatility_plot = ggplot(data = bf_data, aes(x = Date)) +
+    geom_line(aes(y = volatility_2, color = viterbi, group = 1)) +
+    xlab("Date") + 
+    ylab("Annualized Volatility") +
+    labs(color="Volatility Regime") +
+    theme(
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    ggtitle("Daily annualized volatility")
+
+prob_vol_plot <- smoothed_prob_plot / volatility_plot
+
+ggsave(
+    "./latex/empirical_results/prob_vol_plot.png",
+    prob_vol_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+
+prob_vol_plot
+```
+
+### Bayesian Estimation analysis
+
+Calculate DIC for models fit by MCMC
+```{r}
+mcmc_model_options <- model_options %>%
+    filter(optim_method_names == "FitMCMC")
+
+mcmc_optim_results <- optim_results[
+    model_options$optim_method_names == "FitMCMC"]
+
+mcmc_model_options$DIC_val = sapply(mcmc_optim_results, function(x) {DIC(x)$DIC})
+
+mcmc_model_options <- mcmc_model_options %>%
+    pivot_wider(
+        id_cols=c(regime_choices, model_choices),
+        names_from=c(dist_choices),
+        values_from=c(DIC_val)
+    ) %>%
+    arrange(regime_choices, desc(model_choices))
+
+knitr::kable(mcmc_model_options, "simple")
+
+```
+
+Get estimated parameters
+```{r}
+# get models for further analysis
+mcmc_chosen_models_mask <- {
+    (model_options$dist_choices == "sstd") & 
+    (model_options$model_choices == "gjrGARCH") &
+    (model_options$optim_method_names == "FitMCMC")
+}
+mcmc_chosen_models = optim_results[mcmc_chosen_models_mask]
+
+# calculate models [0.25, 0.75] quantiles
+calculate_params_quantiles <- function(mcmc_model) {
+    # prepare some vars
+    probs <- c(0.25, 0.75)
+    num_regimes <- mcmc_model$spec$K
+    param_names <- colnames(mcmc_model$par)
+    regimes <- str_split(param_names, "_", simplify = TRUE)[, 2]
+    unique_regimes <- unique(regimes)
+    # param_names <- sapply(
+    #     colnames(mcmc_model$par),
+    #     function(nm) {paste(num_regimes, nm, sep = "_")}
+    # )
+    # cal quantiles
+    quant_results <- lapply(
+        seq(1, ncol(mcmc_model$par)),
+        function(x) {quantile(mcmc_model$par[, x], probs)}
+    )
+    # calculate annualized vols
+    ann_vol <- unlist(calculate_annualized_volatility(mcmc_model))
+    ann_vol_param_names <- sapply(
+        unique_regimes,
+        function(x) paste("ann_vol", x, sep = "_")
+    )
+    ann_vol_df <- tibble(
+        param = ann_vol_param_names,
+        regime = unique_regimes,
+        val = ann_vol
+    ) 
+    # organize into tibble
+    quant_df <- bind_rows(quant_results)
+    colnames(quant_df) <- c(
+        paste("first_quartile", num_regimes, sep = "_"),
+        paste("second_quartile", num_regimes, sep = "_")
+    )
+    quant_df %>% mutate(
+            param = param_names,
+            regime = regimes,
+            val = colMeans(mcmc_model$par),
+            .before = paste("first_quartile", num_regimes, sep = "_")
+        ) %>%
+        bind_rows(., ann_vol_df) %>%
+        rename_with(function(x) {paste("mean", num_regimes, sep = "_")}, "val")
+}
+
+mcmc_params <- lapply(
+    mcmc_chosen_models,
+    calculate_params_quantiles
+)
+
+mcmc_params_df <- as_tibble(
+    Reduce(
+        function(...) merge(..., by=c("param", "regime"), all = TRUE),
+        mcmc_params
+    )
+) %>% arrange(regime, param)
+
+knitr::kable(mcmc_params_df, "simple")
+
+
+```
+
+Plot estimated
+```{r fig.height=6, fig.width=10}
+mcmc_regime_mapping <- data.frame(
+    row.names = c(1, 2, 3),
+    val = c("Low", "Medium", "High")
+)
+
+mcmc_ind <- 3
+mcmc_state <- State(object = mcmc_chosen_models[[mcmc_ind]])
+bf_data <- bf_data %>% 
+    mutate(
+        mcmc_smooth_prob = apply(mcmc_state$SmoothProb, c(1, 3), mean)[
+            1:nrow(bf_data), 3
+        ],
+        mcmc_smooth_prob_med = apply(mcmc_state$SmoothProb, c(1, 3), mean)[
+            1:nrow(bf_data), 2
+        ],
+        mcmc_volatility = sqrt(365) * Volatility(mcmc_chosen_models[[mcmc_ind]]),
+        mcmc_viterbi = as_factor(
+            sapply(
+                apply(mcmc_state$Viterbi, 1, getmode),
+                function(x) mcmc_regime_mapping[x, ]
+            )
+        )
+    )
+
+mcmc_smoothed_prob_plot = ggplot(data = bf_data, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return / 100 + 0.5, color = mcmc_viterbi),
+        size = 0.7,
+        alpha = 0.6
+    ) +
+    geom_line(aes(y = mcmc_smooth_prob), color="darkblue") +
+    xlab("") + 
+    ylab("Smoothed Probability") +
+    theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    ggtitle("Smoothed probabilities of the high-volatility regime")
+
+mcmc_smoothed_prob_med_plot = ggplot(data = bf_data, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return / 100 + 0.5, color = mcmc_viterbi),
+        size = 0.7,
+        alpha = 0.6
+    ) +
+    geom_line(aes(y = mcmc_smooth_prob_med), color="darkblue") +
+    xlab("") + 
+    ylab("Smoothed Probability") +
+    theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    ggtitle("Smoothed probabilities of the medium-volatility regime")
+
+mcmc_volatility_plot = ggplot(data = bf_data, aes(x = Date)) +
+    geom_line(aes(y = mcmc_volatility, color = mcmc_viterbi, group = 1)) +
+    xlab("Date") + 
+    ylab("Annualized Volatility") +
+    labs(color="Volatility Regime") +
+    theme(
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    scale_color_brewer(palette = "Paired") +
+    ggtitle("Daily annualized volatility")
+
+mcmc_prob_vol_plot <- mcmc_smoothed_prob_plot / mcmc_smoothed_prob_med_plot / mcmc_volatility_plot
+
+ggsave(
+    "./latex/empirical_results/mcmc_prob_vol_plot.png",
+    mcmc_prob_vol_plot,
+    width = 8,
+    height = 9,
+    dpi = "print"
+)
+
+mcmc_prob_vol_plot
+```
+
+## Out-of-sample analysis
+
+### MLE
+Calculate 1-step-ahead VaR for out-of-sample data.
+
+```{r}
+# define VaR prediction calculation
+var_one_step_ahead <- function(
+    data,
+    date,
+    new_data,
+    model_spec,
+    spec_name = NULL,
+    fit_length = 1500,
+    num_pred_days = 5,
+    max_fit_attempts = 3,
+    optim_fn = FitML
+) {
+    alphas <- c(0.005, 0.01, 0.05, 0.1)
+    # get the right data and metadata
+    fit_log_returns <- data %>% 
+        filter(Date < date) %>%
+        select(log_return) %>%
+        slice_tail(n = fit_length)
+    oos_data <- data %>% 
+        filter(Date >= date) %>%
+        slice_head(n = num_pred_days)
+    oos_log_returns <- oos_data$log_return
+    oos_dates <- oos_data$Date
+    # fit model with retry
+    attempt <- 1
+    fitted_model = NULL
+    while( attempt <= max_fit_attempts ) {
+        attempt <- attempt + 1
+        try(
+            fitted_model <- optim_fn(
+                spec=model_spec,
+                data=as.matrix(fit_log_returns)
+            )
+        )
+    }
+    if (is.null(fitted_model)) {
+        err_mess = sprintf(
+            "Optim for date %s failed after %i attempts",
+            date, max_fit_attempts
+        )
+        return(date)
+    }
+    # predict 1-step-ahead VaR for the next days
+    # without updating the model
+    oos_sink = c()
+    VaR_results = list()
+    for (i in 1:(num_pred_days)) {
+        predicted_VaR <- Risk(
+            fitted_model,
+            newdata = oos_sink,
+            alpha = alphas,
+            do.es = FALSE
+        )
+        predicted_VaR <- as_tibble(predicted_VaR$VaR)
+        predicted_VaR$date <- oos_dates[i]
+        predicted_VaR$name <- spec_name
+        VaR_results[[i]] <- predicted_VaR
+        # add the data point to sink for next 
+        # 1-step-ahead prediction
+        oos_sink = append(oos_sink, oos_log_returns[i])
+    }
+    VaR_results = bind_rows(VaR_results)
+    VaR_results$order = seq(1, num_pred_days)
+    return(VaR_results)
+}
+# define dates to run
+n_cores <- 8L
+oos_dates <- bf_data %>%
+    filter(Date >= "2021-01-01") %>%
+    # filter(Date >= "2020-01-01") %>%
+    # filter(Date >= "2019-05-01") %>%
+    select(Date)
+fit_data_length = nrow(bf_data) - nrow(oos_dates)
+num_pred_days = 5
+dates_to_run <- oos_dates$Date[seq(
+    1, nrow(oos_dates), num_pred_days)]
+
+# create model specs
+oos_spec_options <- list(
+    model=c("sGARCH"),
+    distribution=c("sstd")
+)
+oos_specs <- lapply(
+    c(1, 2, 3),
+    function(k) {
+        CreateSpec(
+            variance.spec = oos_spec_options,
+            distribution.spec = oos_spec_options,
+            switch.spec = list(
+                do.mix = FALSE,
+                K = k
+            )
+        )
+    }
+)
+
+# single-regime GARCH
+oos_VaR_results_1 <- mclapply(
+    dates_to_run,
+    var_one_step_ahead,
+    data = bf_data,
+    model_spec = oos_specs[[1]],
+    fit_length = fit_data_length,
+    num_pred_days = num_pred_days,
+    spec_name = "VaR - MSGARCH(1)",
+    mc.cores = getOption("mc.cores", n_cores)
+)
+
+oos_VaR_results_2 <- mclapply(
+    dates_to_run,
+    var_one_step_ahead,
+    data = bf_data,
+    model_spec = oos_specs[[2]],
+    fit_length = fit_data_length,
+    num_pred_days = num_pred_days,
+    spec_name = "VaR - MSGARCH(2)",
+    mc.cores = getOption("mc.cores", n_cores)
+)
+
+oos_VaR_results_3 <- mclapply(
+    dates_to_run,
+    var_one_step_ahead,
+    data = bf_data,
+    model_spec = oos_specs[[3]],
+    fit_length = fit_data_length,
+    num_pred_days = num_pred_days,
+    spec_name = "VaR - MSGARCH(3)",
+    mc.cores = getOption("mc.cores", n_cores)
+)
+oos_VaR_results_1 <- bind_rows(oos_VaR_results_1)
+oos_VaR_results_2 <- bind_rows(oos_VaR_results_2)
+oos_VaR_results_3 <- bind_rows(oos_VaR_results_3)
+oos_VaR_results <- bind_rows(list(
+    oos_VaR_results_1,
+    oos_VaR_results_2,
+    oos_VaR_results_3
+))
+```
+
+For testing purpose. Sometimes `FitML` throws error due to non-finite objective function value. Here we try to find the date where that happens.
+
+```{r eval=FALSE, include=FALSE}
+
+for (i in 1:length(oos_VaR_results_3)) {
+    if (!is_tibble(oos_VaR_results_3[[i]])) {
+        print(paste(i, oos_VaR_results_3[[i]]))
+    }
+}
+
+# a = var_one_step_ahead(
+#     data = bf_data,
+#     date = "2019-02-06",
+#     model_spec = chosen_models[[3]]$spec,
+#     fit_length = fit_data_length,
+#     num_pred_days = 5,
+#     spec_name = "MSGARCH_sstd_2",
+#     max_fit_attempts = 5
+# )
+# print(a)
+
+```
+
+```{r}
+data <- bf_data
+date <- "2021-01-15"
+# get the right data and metadata
+fit_log_returns <- data %>% 
+    filter(Date < date) %>%
+    select(log_return) %>%
+    slice_tail(n = fit_data_length)
+oos_data <- data %>% 
+    filter(Date >= date) %>%
+    slice_head(n = num_pred_days)
+oos_log_returns <- oos_data$log_return
+oos_dates <- oos_data$Date
+
+fitted_model <- FitML(
+    spec = oos_specs[[1]],
+    data = fit_log_returns$log_return
+)
+
+```
+
+Then we visualize outputs before doing tests.
+
+```{r}
+oos_VaR_results <- bf_data %>%
+    select(Date, log_return) %>%
+    merge(
+        x = .,
+        y = oos_VaR_results,
+        by.x = "Date",
+        by.y = "date"
+    )
+oos_VaR_results <- as_tibble(oos_VaR_results)
+oos_VaR_results
+
+```
+
+
+```{r fig.height=6, fig.width=10}
+VaR_0005_plot <- ggplot(data = oos_VaR_results, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return, color = "Log Return (%)"),
+        alpha = 0.5,
+        size = 0.6
+    ) +
+    geom_line(
+        aes(y = `0.005`, color = name),
+        alpha = 0.7
+    ) +
+    scale_color_manual("", values = c(
+        "Log Return (%)" = "black",
+        "VaR - MSGARCH(1)" = "darkblue",
+        "VaR - MSGARCH(2)" = "darkred",
+        "VaR - MSGARCH(3)" = "yellow"
+    )) +
+    xlab("") +
+    ylab("") +
+    theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    ggtitle(
+        "Out-of-sample Value-at-Risk 1-day-ahead forecasts, 0.5% risk level")
+
+VaR_005_plot <- ggplot(data = oos_VaR_results, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return, color = "Log Return (%)"),
+        alpha = 0.5,
+        size = 0.7
+    ) +
+    geom_line(
+        aes(y = `0.05`, color = name),
+        alpha = 0.7
+    ) +
+    ylab("") +
+    scale_color_manual("", values = c(
+        "Log Return (%)" = "black",
+        "VaR - MSGARCH(1)" = "darkblue",
+        "VaR - MSGARCH(2)" = "darkred",
+        "VaR - MSGARCH(3)" = "yellow"
+    )) +
+    theme(
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5)    
+    ) +
+    ggtitle(
+        "Out-of-sample Value-at-Risk 1-day-ahead forecasts, 5% risk level")
+
+oos_VaR_plot <- VaR_0005_plot / VaR_005_plot
+ggsave(
+    "./latex/empirical_results/oos_VaR.png",
+    oos_VaR_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+oos_VaR_plot
+
+
+```
+
+
+
+Now, we do some LR tests
+
+```{r}
+LR_test_single_alpha <- function(df, alp) {
+    single_alpha_df <- df %>%
+        filter(alpha == alp) %>%
+        arrange(Date)
+    # do backtest
+    raw_test_results = BacktestVaR(
+        data = single_alpha_df$log_return,
+        VaR = single_alpha_df$VaR,
+        alpha = alp
+    )
+    lr_results <- bind_rows(raw_test_results[c("LRuc", "LRcc")])
+    colnames(lr_results) <- c("test_statistics", "p_value")
+    lr_results$test_name <- c("LRuc", "LRcc")
+    lr_results$alpha <- alp
+    return(lr_results)
+}
+
+do_LR_test <- function(
+    oos_VaR_data, 
+    model_name,
+    alphas = c(0.005, 0.01, 0.05, 0.1)
+) {
+    # prepare data
+    LR_test_data <- oos_VaR_data %>% 
+        filter(name == model_name) %>%
+        pivot_longer(
+            cols = as.character(alphas),
+            names_to = "alpha",
+            values_to = "VaR"
+        ) %>%
+        mutate(alpha = as.numeric(alpha))
+    # do backtest
+    results = lapply(
+        alphas,
+        LR_test_single_alpha,
+        df = LR_test_data
+    )
+    results_df <- bind_rows(results)
+    results_df$model_name <- model_name
+    results_df
+}
+
+
+lr_test_results <- lapply(
+    unique(oos_VaR_results$name),
+    do_LR_test,
+    oos_VaR_data = oos_VaR_results,
+    alphas = c(0.005, 0.01, 0.05, 0.1)
+)
+lr_test_results <- bind_rows(lr_test_results)
+lr_test_results_stats <- lr_test_results %>% 
+    pivot_wider(
+        id_cols = c(model_name, test_name),
+        names_from = c(alpha),
+        values_from = c(test_statistics)
+    )
+lr_test_results_p_vals <- lr_test_results %>% 
+    pivot_wider(
+        id_cols = c(model_name, test_name),
+        names_from = c(alpha),
+        values_from = c(p_value)
+    )
+lr_test_results_all <- lr_test_results %>% 
+    pivot_wider(
+        id_cols = c(model_name, test_name),
+        names_from = c(alpha),
+        values_from = c(test_statistics, p_value)
+    ) %>%
+    arrange(model_name)
+
+knitr::kable(lr_test_results_all, "simple")
+print(lr_test_results_all)
+# print(lr_test_results_stats)
+# print(lr_test_results_p_vals)
+```
+
+Table of hits
+```{r}
+alphas = c(0.005, 0.01, 0.05, 0.1)
+VaR_hit_df <- oos_VaR_results %>%
+    pivot_longer(
+        cols = as.character(alphas),
+        names_to = "alpha",
+        values_to = "VaR"
+    ) %>%
+    mutate(
+        alpha = as.numeric(alpha),
+        hit = log_return < VaR
+    ) %>%
+    pivot_wider(
+        id_cols = c(name),
+        names_from = c(alpha),
+        values_from = c(hit),
+        values_fn = sum
+    ) %>%
+    add_row(
+        name = "Expected # of hits",
+        `0.005` = 0.005 * nrow(oos_VaR_results),
+        `0.01` = 0.01 * nrow(oos_VaR_results),
+        `0.05` = 0.05 * nrow(oos_VaR_results),
+        `0.1` = 0.1 * nrow(oos_VaR_results),
+    ) %>%
+    arrange(name)
+
+knitr::kable(VaR_hit_df, "simple")
+```
+
+
+### Bayesian
+
+```{r}
+# define dates to run
+n_cores <- 8L
+oos_dates <- bf_data %>%
+    filter(Date >= "2021-01-01") %>%
+    # filter(Date >= "2020-01-01") %>%
+    # filter(Date >= "2019-05-01") %>%
+    select(Date)
+fit_data_length = nrow(bf_data) - nrow(oos_dates)
+num_pred_days = 5
+dates_to_run <- oos_dates$Date[seq(
+    1, nrow(oos_dates), num_pred_days)]
+
+# create model specs
+mcmc_oos_spec_options <- list(
+    model=c("gjrGARCH"),
+    distribution=c("sstd")
+)
+mcmc_oos_specs <- lapply(
+    c(1, 2, 3),
+    function(k) {
+        CreateSpec(
+            variance.spec = mcmc_oos_spec_options,
+            distribution.spec = mcmc_oos_spec_options,
+            switch.spec = list(
+                do.mix = FALSE,
+                K = k
+            )
+        )
+    }
+)
+
+# single-regime GARCH
+mcmc_oos_VaR_results_1 <- mclapply(
+    dates_to_run,
+    var_one_step_ahead,
+    data = bf_data,
+    model_spec = mcmc_oos_specs[[1]],
+    fit_length = fit_data_length,
+    num_pred_days = num_pred_days,
+    spec_name = "VaR - MCMC - MSGARCH(1)",
+    optim_fn = FitMCMC,
+    mc.cores = getOption("mc.cores", n_cores)
+)
+
+mcmc_oos_VaR_results_2 <- mclapply(
+    dates_to_run,
+    var_one_step_ahead,
+    data = bf_data,
+    model_spec = mcmc_oos_specs[[2]],
+    fit_length = fit_data_length,
+    num_pred_days = num_pred_days,
+    spec_name = "VaR - MCMC - MSGARCH(2)",
+    optim_fn = FitMCMC,
+    mc.cores = getOption("mc.cores", n_cores)
+)
+
+mcmc_oos_VaR_results_3 <- mclapply(
+    dates_to_run,
+    var_one_step_ahead,
+    data = bf_data,
+    model_spec = mcmc_oos_specs[[3]],
+    fit_length = fit_data_length,
+    num_pred_days = num_pred_days,
+    spec_name = "VaR - MCMC - MSGARCH(3)",
+    optim_fn = FitMCMC,
+    mc.cores = getOption("mc.cores", n_cores)
+)
+mcmc_oos_VaR_results_1 <- bind_rows(mcmc_oos_VaR_results_1)
+mcmc_oos_VaR_results_2 <- bind_rows(mcmc_oos_VaR_results_2)
+mcmc_oos_VaR_results_3 <- bind_rows(mcmc_oos_VaR_results_3)
+mcmc_oos_VaR_results <- bind_rows(list(
+    mcmc_oos_VaR_results_1,
+    mcmc_oos_VaR_results_2,
+    mcmc_oos_VaR_results_3
+))
+```
+
+For testing purpose. Sometimes `FitML` throws error due to non-finite objective function value. Here we try to find the date where that happens.
+
+```{r eval=FALSE, include=FALSE}
+
+# for (i in 1:length(oos_VaR_results_3)) {
+#     if (!is_tibble(oos_VaR_results_3[[i]])) {
+#         print(paste(i, oos_VaR_results_3[[i]]))
+#     }
+# }
+
+# a = var_one_step_ahead(
+#     data = bf_data,
+#     date = "2019-02-06",
+#     model_spec = chosen_models[[3]]$spec,
+#     fit_length = fit_data_length,
+#     num_pred_days = 5,
+#     spec_name = "MSGARCH_sstd_2",
+#     max_fit_attempts = 5
+# )
+# print(a)
+
+```
+
+Then we visualize outputs before doing tests.
+
+```{r}
+mcmc_oos_VaR_results <- bf_data %>%
+    select(Date, log_return) %>%
+    merge(
+        x = .,
+        y = mcmc_oos_VaR_results,
+        by.x = "Date",
+        by.y = "date"
+    )
+mcmc_oos_VaR_results <- as_tibble(mcmc_oos_VaR_results)
+mcmc_oos_VaR_results
+
+```
+
+
+```{r fig.height=6, fig.width=10}
+mcmc_VaR_0005_plot <- ggplot(data = mcmc_oos_VaR_results, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return, color = "Log Return (%)"),
+        alpha = 0.5,
+        size = 0.6
+    ) +
+    geom_line(
+        aes(y = `0.005`, color = name),
+        alpha = 0.7
+    ) +
+    scale_color_manual("", values = c(
+        "Log Return (%)" = "black",
+        "VaR - MCMC - MSGARCH(1)" = "darkblue",
+        "VaR - MCMC - MSGARCH(2)" = "darkred",
+        "VaR - MCMC - MSGARCH(3)" = "yellow"
+    )) +
+    xlab("") +
+    ylab("") +
+    theme(
+        legend.position = "none",
+        plot.title = element_text(hjust = 0.5)
+    ) +
+    ggtitle(
+        "Out-of-sample Value-at-Risk 1-day-ahead forecasts, 0.5% risk level")
+
+mcmc_VaR_005_plot <- ggplot(data = mcmc_oos_VaR_results, aes(x = Date)) +
+    geom_point(
+        aes(y = log_return, color = "Log Return (%)"),
+        alpha = 0.5,
+        size = 0.7
+    ) +
+    geom_line(
+        aes(y = `0.05`, color = name),
+        alpha = 0.7
+    ) +
+    ylab("") +
+    scale_color_manual("", values = c(
+        "Log Return (%)" = "black",
+        "VaR - MCMC - MSGARCH(1)" = "darkblue",
+        "VaR - MCMC - MSGARCH(2)" = "darkred",
+        "VaR - MCMC - MSGARCH(3)" = "yellow"
+    )) +
+    theme(
+        legend.position = "bottom",
+        plot.title = element_text(hjust = 0.5)    
+    ) +
+    ggtitle(
+        "Out-of-sample Value-at-Risk 1-day-ahead forecasts, 5% risk level")
+
+mcmc_oos_VaR_plot <- mcmc_VaR_0005_plot / mcmc_VaR_005_plot
+ggsave(
+    "./latex/empirical_results/mcmc_oos_VaR.png",
+    mcmc_oos_VaR_plot,
+    width = 8,
+    height = 5,
+    dpi = "print"
+)
+mcmc_oos_VaR_plot
+
+
+```
+
+
+
+Now, we do some LR tests
+
+```{r}
+mcmc_lr_test_results <- lapply(
+    unique(mcmc_oos_VaR_results$name),
+    do_LR_test,
+    oos_VaR_data = mcmc_oos_VaR_results,
+    alphas = c(0.005, 0.01, 0.05, 0.1)
+)
+mcmc_lr_test_results <- bind_rows(mcmc_lr_test_results)
+mcmc_lr_test_results_stats <- mcmc_lr_test_results %>% 
+    pivot_wider(
+        id_cols = c(model_name, test_name),
+        names_from = c(alpha),
+        values_from = c(test_statistics)
+    )
+mcmc_lr_test_results_p_vals <- mcmc_lr_test_results %>% 
+    pivot_wider(
+        id_cols = c(model_name, test_name),
+        names_from = c(alpha),
+        values_from = c(p_value)
+    )
+mcmc_lr_test_results_all <- mcmc_lr_test_results %>% 
+    pivot_wider(
+        id_cols = c(model_name, test_name),
+        names_from = c(alpha),
+        values_from = c(test_statistics, p_value)
+    ) %>%
+    arrange(model_name)
+
+knitr::kable(mcmc_lr_test_results_all, "simple")
+print(mcmc_lr_test_results_all)
+# print(lr_test_results_stats)
+# print(lr_test_results_p_vals)
+```
+
+Table of hits
+```{r}
+alphas = c(0.005, 0.01, 0.05, 0.1)
+mcmc_VaR_hit_df <- mcmc_oos_VaR_results %>%
+    pivot_longer(
+        cols = as.character(alphas),
+        names_to = "alpha",
+        values_to = "VaR"
+    ) %>%
+    mutate(
+        alpha = as.numeric(alpha),
+        hit = log_return < VaR
+    ) %>%
+    pivot_wider(
+        id_cols = c(name),
+        names_from = c(alpha),
+        values_from = c(hit),
+        values_fn = sum
+    ) %>%
+    add_row(
+        name = "Expected # of hits",
+        `0.005` = 0.005 * nrow(mcmc_oos_VaR_results),
+        `0.01` = 0.01 * nrow(mcmc_oos_VaR_results),
+        `0.05` = 0.05 * nrow(mcmc_oos_VaR_results),
+        `0.1` = 0.1 * nrow(mcmc_oos_VaR_results),
+    ) %>%
+    arrange(name)
+
+knitr::kable(mcmc_VaR_hit_df, "simple")
+```
+
+
+
